@@ -1,10 +1,10 @@
 # Define o compilador
 CC = gcc
 
-# Define flags de compilação (g = debug, Wall = todos os warnings, std=c99 para compatibilidade)
+# Define flags de compilacao (g = debug, Wall = todos os warnings, std=c99 para compatibilidade)
 CFLAGS = -g -Wall -Wextra -std=c99 -o
 
-# Nomes dos executáveis
+# Nomes dos executaveis
 CLIENT = meu_navegador
 SERVER = meu_servidor
 

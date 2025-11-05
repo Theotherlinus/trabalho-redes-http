@@ -2,193 +2,196 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <sys/stat.h>
 #include <dirent.h>
+#include <arpa/inet.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
-#define PORT 8080
-#define BUFFER_SIZE 4096
+#define BACKLOG 10
+#define BUF_SZ 8192
 
-// Função para enviar resposta 404 Not Found
-void send_404(int client_socket) {
-    char *response = "HTTP/1.1 404 Not Found\r\n"
-                     "Content-Type: text/html\r\n"
-                     "Connection: close\r\n\r\n"
-                     "<html><body><h1>404 Not Found</h1></body></html>";
-    write(client_socket, response, strlen(response));
+// retorna o tipo mime basico com base na extensao do nome
+// esta funcao usa apenas alguns tipos comuns para simplificar
+
+static const char *get_mime(const char *name) {
+    const char *ext = strrchr(name, '.');
+    if (!ext) return "application/octet-stream";
+    if (strcmp(ext, ".html") == 0) return "text/html; charset=utf-8";
+    if (strcmp(ext, ".htm") == 0) return "text/html; charset=utf-8";
+    if (strcmp(ext, ".css") == 0) return "text/css";
+    if (strcmp(ext, ".js") == 0) return "application/javascript";
+    if (strcmp(ext, ".png") == 0) return "image/png";
+    if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) return "image/jpeg";
+    if (strcmp(ext, ".gif") == 0) return "image/gif";
+    return "application/octet-stream";
 }
 
-// Função para enviar um arquivo
-void send_file(int client_socket, const char *filepath) {
-    FILE *file = fopen(filepath, "rb");
-    if (file == NULL) {
-        send_404(client_socket);
-        return;
-    }
-
-    // Obter o tamanho do arquivo
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    // Enviar cabeçalhos
-    char header[BUFFER_SIZE];
-    snprintf(header, BUFFER_SIZE,
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Length: %ld\r\n"
-             "Connection: close\r\n\r\n", // TODO: Adicionar Content-Type se tiver tempo
-             file_size);
-    write(client_socket, header, strlen(header));
-
-    // Enviar conteúdo do arquivo em chunks
-    char buffer[BUFFER_SIZE];
-    size_t bytes_read;
-    while ((bytes_read = fread(buffer, 1, BUFFER_SIZE, file)) > 0) {
-        write(client_socket, buffer, bytes_read);
-    }
-    fclose(file);
+void send_404(int fd) {
+    // envia uma resposta 404 simples em texto plano
+    // aqui mantemos a linha de status padrao do http
+    const char *resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n\r\narquivo nao encontrado.";
+    send(fd, resp, strlen(resp), 0);
 }
 
-// Função para listar um diretório
-void list_directory(int client_socket, const char *dirpath, const char* relative_path) {
-    DIR *dir = opendir(dirpath);
-    if (dir == NULL) {
-        send_404(client_socket);
-        return;
-    }
+void send_500(int fd) {
+    // envia resposta 500 indicando erro interno no servidor
+    // usado quando alguma chamada de sistema falha
+    const char *resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nerro interno do servidor.";
+    send(fd, resp, strlen(resp), 0);
+}
 
-    char response_body[BUFFER_SIZE * 4] = {0}; // Buffer grande para o HTML
-    snprintf(response_body, sizeof(response_body),
-             "<html><head><title>Index of %s</title></head>"
-             "<body><h1>Index of %s</h1><ul>",
-             relative_path, relative_path);
+// gera e envia uma pagina html com a lista de arquivos
+// cada arquivo vira um link para download
+void send_index(int fd) {
+    DIR *dir = opendir(".");
+    if (!dir) { send_500(fd); return; }
+
+    // cabeçalho http indicando sucesso e conteudo html
+    const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n";
+    send(fd, hdr, strlen(hdr), 0);
+
+    // inicio do html com titulo e lista
+    send(fd, "<!doctype html><html><head><meta charset='utf-8'><title>Arquivos</title></head><body>", 86, 0);
+    send(fd, "<h1>Arquivos disponiveis</h1><ul>", 34, 0);
 
     struct dirent *entry;
+    char line[1024];
     while ((entry = readdir(dir)) != NULL) {
-        if (strcmp(entry->d_name, ".") == 0) continue; // Ignorar .
+        // ignora entradas especiais
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
 
-        // Garante que o link não tenha barras duplas se relative_path for "/"
-        char link_path[1024];
-        if (strcmp(relative_path, "/") == 0) {
-            snprintf(link_path, sizeof(link_path), "%s%s", relative_path, entry->d_name);
-        } else {
-            snprintf(link_path, sizeof(link_path), "%s/%s", relative_path, entry->d_name);
-        }
-
-        snprintf(response_body + strlen(response_body),
-                 sizeof(response_body) - strlen(response_body),
-                 "<li><a href=\"%s\">%s</a></li>",
-                 link_path, entry->d_name);
+        // monta a linha de lista com link para o arquivo
+        snprintf(line, sizeof(line),
+                 "<li><a href=\"/%s\" download>%s</a></li>",
+                 entry->d_name, entry->d_name);
+        send(fd, line, strlen(line), 0);
     }
+
     closedir(dir);
-    strcat(response_body, "</ul></body></html>");
-
-    // Enviar cabeçalhos + corpo HTML
-    char header[BUFFER_SIZE];
-    snprintf(header, BUFFER_SIZE,
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: text/html\r\n"
-             "Content-Length: %ld\r\n"
-             "Connection: close\r\n\r\n",
-             strlen(response_body));
-
-    write(client_socket, header, strlen(header));
-    write(client_socket, response_body, strlen(response_body));
+    send(fd, "</ul></body></html>", 20, 0);
 }
 
-int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Uso: %s <diretorio_raiz>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-    char *root_dir = argv[1];
+// trata e envia um arquivo solicitado
+// validacoes simples: remove barra inicial, evita path traversal, abre e envia
+void send_file(int fd, const char *path) {
+    const char *p = path;
+    // remove barra inicial se houver
+    if (p[0] == '/') p++;
+    // se caminho vazio, envia a pagina index
+    if (p[0] == '\0') { send_index(fd); return; }
 
-    int server_fd, client_socket;
-    struct sockaddr_in address;
+    // evita navegacao para diretorios pai
+    if (strstr(p, "..")) { send_404(fd); return; }
+
+    // abre o arquivo para leitura
+    int f = open(p, O_RDONLY);
+    if (f < 0) { send_404(fd); return; }
+
+    struct stat st;
+    if (fstat(f, &st) < 0) { close(f); send_500(fd); return; }
+
+    // monta e envia os cabecalhos http (content-type, content-length)
+    char header[512];
+    const char *mime = get_mime(p);
+    snprintf(header, sizeof(header),
+             "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %ld\r\n"
+             "Content-Disposition: attachment; filename=\"%s\"\r\n\r\n",
+             mime, (long)st.st_size, p);
+    send(fd, header, strlen(header), 0);
+
+    // envia o corpo em blocos de ate BUF_SZ bytes
+    char buf[BUF_SZ];
+    ssize_t r;
+    while ((r = read(f, buf, sizeof(buf))) > 0)
+        send(fd, buf, r, 0);
+    close(f);
+}
+
+int main(int argc, char **argv) {
+    // porta padrao e pasta servida
+    int port = 8080;
+    const char *folder = ".";
+
+    // se o usuario passou um diretorio existente, usamos ele como pasta raiz
+    if (argc > 1 && access(argv[1], F_OK) == 0) {
+        folder = argv[1];
+        chdir(folder);
+    }
+
+    // se o usuario passou a porta como segundo argumento, usamos ela
+      if (argc > 2) {
+        int temp = atoi(argv[2]);
+        if (temp > 0) port = temp;
+    }
+
+    // cria o socket tcp
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) { perror("socket"); return 1; }
+
     int opt = 1;
-    int addrlen = sizeof(address);
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
-    // Criar socket
-    if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    // associa o socket a porta escolhida
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        return 1;
     }
 
-    // Configurar socket para reutilizar porta
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-        perror("setsockopt");
-        exit(EXIT_FAILURE);
-    }
-
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    // Bind
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
-    }
-
-    // Listen
-    if (listen(server_fd, 10) < 0) {
+    // comeca a escutar conexoes
+    if (listen(sockfd, BACKLOG) < 0) {
         perror("listen");
-        exit(EXIT_FAILURE);
+        return 1;
     }
 
-    printf("Servidor rodando em http://localhost:%d/ servindo de %s\n", PORT, root_dir);
+    // imprime informacao basica no terminal
+    printf("servidor http rodando na porta %d, servindo pasta: %s\n", port, folder);
 
-    // Loop principal de aceite
-    while (1) {
-        if ((client_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
-            perror("accept");
-            continue; // Continua para o próximo cliente
-        }
+    // loop principal: aceita conexoes e processa uma por vez
+    for (;;) {
+        struct sockaddr_in cli;
+        socklen_t clilen = sizeof(cli);
+        int client = accept(sockfd, (struct sockaddr*)&cli, &clilen);
+        if (client < 0) continue;
 
-        char buffer[BUFFER_SIZE] = {0};
-        read(client_socket, buffer, BUFFER_SIZE - 1);
+        // le a requisicao do cliente
+        char req[4096];
+        ssize_t len = recv(client, req, sizeof(req)-1, 0);
+        if (len <= 0) { close(client); continue; }
+        req[len] = 0;
 
-        // Extrair o caminho da requisição (ex: GET /path/file.html HTTP/1.1)
-        char method[16], path[1024], protocol[16];
-        if (sscanf(buffer, "%s %s %s", method, path, protocol) < 3) {
-            close(client_socket);
+        // extrai o metodo e o path da primeira linha
+        char method[8], path[1024];
+        if (sscanf(req, "%7s %1023s", method, path) != 2) {
+            close(client);
             continue;
         }
 
-        printf("Requisição recebida: %s %s\n", method, path);
-
-        // Construir caminho completo do arquivo no sistema
-        char file_path[2048];
-        snprintf(file_path, sizeof(file_path), "%s%s", root_dir, path);
-
-        // Verificar se o caminho é um diretório
-        struct stat path_stat;
-        stat(file_path, &path_stat);
-
-        if (S_ISDIR(path_stat.st_mode)) {
-            // É um diretório, verificar se 'index.html' existe
-            char index_path[2048];
-            snprintf(index_path, sizeof(index_path), "%s/index.html", file_path);
-            
-            if (access(index_path, F_OK) == 0) {
-                // index.html existe, enviar ele
-                send_file(client_socket, index_path);
-            } else {
-                // index.html não existe, listar o diretório
-                list_directory(client_socket, file_path, path);
-            }
-        } else if (S_ISREG(path_stat.st_mode)) {
-            // É um arquivo regular, enviar o arquivo
-            send_file(client_socket, file_path);
-        } else {
-            // Não encontrado
-            send_404(client_socket);
+        // aceita apenas get
+        if (strcmp(method, "GET") != 0) {
+            const char *m = "HTTP/1.1 405 Method Not Allowed\r\nAllow: GET\r\n\r\n";
+            send(client, m, strlen(m), 0);
+            close(client);
+            continue;
         }
 
-        close(client_socket);
+        // rota basica: index ou arquivo solicitado
+        if (strcmp(path, "/") == 0 || strcmp(path, "/index.html") == 0)
+            send_index(client);
+        else
+            send_file(client, path);
+
+        // fecha a conexao apos responder
+        close(client);
     }
 
+    close(sockfd);
     return 0;
 }

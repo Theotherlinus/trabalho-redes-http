@@ -1,13 +1,13 @@
-# Trabalho de Redes - Cliente e Servidor HTTP em C
+# trabalho de redes - cliente e servidor http em c
 
-Este repositório contém os fontes para um cliente e um servidor HTTP simples, implementados em C.
+este repositorio contem os fontes para um cliente e um servidor http simples, implementados em c.
 
-## Componentes
+## componentes
 
-### 1. Servidor HTTP (meu_servidor)
+### 1. servidor http (meu_servidor)
 
-O servidor é capaz de servir arquivos estáticos de um diretório especificado.
+o servidor e capaz de servir arquivos estaticos de um diretorio especificado.
 
-**Compilação:**
+**compilacao:**
 ```bash
 make meu_servidor
